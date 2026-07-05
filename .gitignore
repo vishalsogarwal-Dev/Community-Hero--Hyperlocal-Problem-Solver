@@ -1,0 +1,88 @@
+# Dependency directories
+node_modules/
+jspm_packages/
+web-ext-artifacts/
+
+# Build and production outputs
+dist/
+build/
+bin/
+obj/
+out/
+.expo/
+.next/
+.nuxt/
+.output/
+
+# Python Virtual Environments & Packages
+.venv/
+venv/
+ENV/
+env/
+pycache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Local Configuration / Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.env
+auth.key
+*.pem
+*.key
+*.pub
+
+# Databases & Docker Volumes
+postgres_data/
+redis_data/
+rabbitmq_data/
+minio_data/
+db-init/data/
+*.db
+*.sqlite
+
+# IDEs & System files
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and databases
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+*.log
+logs/
+
+# AI weights & temporary large assets
+*.pt
+*.onnx
+*.weights
+raw/
+public/
+downloads/
+uploads/
+temp/
+tmp/
