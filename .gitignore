@@ -86,3 +86,7 @@ downloads/
 uploads/
 temp/
 tmp/
+venv/
+**/venv/
+.env
+**/.env

@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 .env
+agent/.env
+agent/venv
+agent/__pycache__
 
 # Editor directories and files
 .vscode/*
@@ -25,4 +28,4 @@ dist-ssr
 *.sw?
 
 # Gemini API Keys Config
-
+src/config/geminiKeys.ts
