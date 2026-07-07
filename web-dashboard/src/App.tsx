@@ -55,6 +55,7 @@ interface Comment {
   author: string;
   text: string;
   created_at: string;
+  image_url?: string;
 }
 
 interface IssueReport {
@@ -73,6 +74,7 @@ interface IssueReport {
   description?: string;
   colony_area?: string; // New field for colonies (e.g. Subhash Nagar, Bharatpur)
   reporter_name?: string; // New field to match reports with their creator
+  reopenLikes?: string[];
 }
 
 interface LeaderboardUser {
@@ -179,7 +181,7 @@ const MOCK_REPORTS: IssueReport[] = [
     id: 'report-3',
     category: 'Water Leak',
     severity: 'Severe',
-    status: 'Resolved',
+    status: 'Reported',
     latitude: 12.9716,
     longitude: 77.5946,
     original_media_url: 'https://images.unsplash.com/photo-1504384308090-c894fdcc538d?auto=format&fit=crop&w=800&q=80',
@@ -191,7 +193,7 @@ const MOCK_REPORTS: IssueReport[] = [
     colony_area: 'MG Road Metro Station, Bangalore',
     reporter_name: 'Priya Sharma',
     comments: [
-      { author: 'Priya Nair', text: 'Clean-up complete, water shut-off resolved.', created_at: '2026-06-26T16:00:00Z' }
+      { author: 'Priya Nair', text: 'Water is gushing out from under the pavement near the metro entrance. Please address this urgently!', created_at: '2026-06-26T09:00:00Z' }
     ]
   },
   {
@@ -210,6 +212,26 @@ const MOCK_REPORTS: IssueReport[] = [
     colony_area: 'Subhash Nagar, Jaipur',
     reporter_name: 'Vikram Singh',
     comments: []
+  },
+  {
+    id: 'report-5',
+    category: 'Pothole',
+    severity: 'Medium',
+    status: 'Resolved',
+    latitude: 28.6250,
+    longitude: 77.2200,
+    original_media_url: 'https://images.unsplash.com/photo-1515162305285-0293e4767cc2?auto=format&fit=crop&w=800&q=80',
+    s3_media_url: 'https://images.unsplash.com/photo-1515162305285-0293e4767cc2?auto=format&fit=crop&w=800&q=80&blur=10',
+    upvotes: 12,
+    downvotes: 1,
+    created_at: '2026-06-25T12:00:00Z',
+    description: 'Pothole resolved near India Gate.',
+    colony_area: 'India Gate, New Delhi',
+    reporter_name: 'Vikram Singh',
+    comments: [
+      { author: 'Municipal Officer', text: '✅ Issue has been resolved. Completion photo uploaded as proof.', created_at: '2026-06-25T15:00:00Z', image_url: 'https://images.unsplash.com/photo-1541888946425-d81bb19240f5?auto=format&fit=crop&w=800&q=80' }
+    ],
+    reopenLikes: []
   }
 ];
 
@@ -248,7 +270,7 @@ const MOCK_ONGOING_REPAIRS: OngoingRepair[] = [
     title: 'Connaught Place Pothole Paving',
     location: 'New Delhi',
     beforeUrl: 'https://images.unsplash.com/photo-1515162305285-0293e4767cc2?auto=format&fit=crop&w=400&q=80',
-    afterUrl: 'https://images.unsplash.com/photo-1599740831464-5eecfa64b8a5?auto=format&fit=crop&w=400&q=80',
+    afterUrl: 'https://images.unsplash.com/photo-1541888946425-d81bb19240f5?auto=format&fit=crop&w=400&q=80',
     status: 'Completed'
   },
   {
@@ -287,10 +309,24 @@ export default function App() {
   const [selectedReport, setSelectedReport] = useState<IssueReport | null>(null);
   const [filterCategory, setFilterCategory] = useState<string>('All');
   const [filterStatus, setFilterStatus] = useState<string>('All');
+  const [filterSeverity, setFilterSeverity] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [showBlurOriginal, setShowBlurOriginal] = useState<boolean>(false);
   const [commentInput, setCommentInput] = useState<string>('');
   const [votedReports, setVotedReports] = useState<Set<string>>(new Set());
+  const [upvotedReports, setUpvotedReports] = useState<Set<string>>(new Set());
+  const [downvotedReports, setDownvotedReports] = useState<Set<string>>(new Set());
+  const [chatPhoto, setChatPhoto] = useState<string | null>(null);
+
+  // --- Report Editing State ---
+  const [isEditingReport, setIsEditingReport] = useState<boolean>(false);
+  const [editCategory, setEditCategory] = useState<string>('');
+  const [editDescription, setEditDescription] = useState<string>('');
+  const [editSeverity, setEditSeverity] = useState<string>('');
+  const [editColonyArea, setEditColonyArea] = useState<string>('');
+
+  // --- Ongoing Repairs State ---
+  const [ongoingRepairs, setOngoingRepairs] = useState<OngoingRepair[]>(MOCK_ONGOING_REPAIRS);
 
   // --- Leaderboard filter state ---
   const [leaderboardFilter, setLeaderboardFilter] = useState<'daily' | 'weekly' | 'monthly' | 'overall'>('overall');
@@ -361,7 +397,110 @@ export default function App() {
     return { count: totalVerified, progress, claimed };
   };
 
-  const { progress: claimProgress, claimed: totalClaimed } = getRewardProgressAndClaimAmount();
+  const { progress: claimProgress } = getRewardProgressAndClaimAmount();
+
+  // --- Leaderboard & Badge calculations ---
+  const getCurrentUserPoints = () => {
+    if (!currentUser) return 0;
+    const userReports = reports.filter(r => r.reporter_name === currentUser.name);
+    let pts = 0;
+    userReports.forEach(r => {
+      pts += 100; // 100 points for reporting
+      if (r.status === 'Verified' || r.status === 'Resolved' || r.status === 'In Progress') {
+        pts += 50; // 50 points for validation
+      }
+    });
+    // Add points for voting/verifying other reports
+    const votesCount = reports.filter(r => r.reporter_name !== currentUser.name && votedReports.has(r.id)).length;
+    pts += votesCount * 15; // 15 points per verification vote
+
+    // Quest Bonuses
+    const potholesReported = reports.filter(r => r.reporter_name === currentUser.name && r.category === 'Pothole').length;
+    if (potholesReported >= 2) {
+      pts += 20;
+    }
+    const wasteVerified = reports.filter(r => r.category === 'Waste' && votedReports.has(r.id)).length;
+    if (wasteVerified >= 3) {
+      pts += 15;
+    }
+
+    return pts;
+  };
+
+  const getLeaderboardList = () => {
+    const filter = leaderboardFilter;
+    const mockList = MOCK_LEADERBOARDS[filter] || [];
+    if (!currentUser) return mockList;
+
+    const baseList = mockList.map(u => ({ ...u }));
+    const userPoints = getCurrentUserPoints();
+
+    const existingIndex = baseList.findIndex(u => u.name.toLowerCase() === currentUser.name.toLowerCase());
+    if (existingIndex >= 0) {
+      baseList[existingIndex].points = userPoints;
+    } else {
+      baseList.push({
+        rank: 0,
+        name: currentUser.name,
+        points: userPoints,
+        badges: [],
+        avatarColor: 'bg-zinc-900'
+      });
+    }
+
+    // Sort by points desc
+    baseList.sort((a, b) => b.points - a.points);
+
+    // Assign ranks and badges
+    return baseList.map((user, idx) => {
+      const rank = idx + 1;
+      const isUser = user.name.toLowerCase() === currentUser.name.toLowerCase();
+      
+      let userBadges = user.badges;
+      if (isUser) {
+        userBadges = [];
+        if (rank === 1) userBadges.push('City Legend');
+        
+        const userResolved = reports.filter(r => r.reporter_name === currentUser.name && r.status === 'Resolved').length;
+        if (userResolved >= 1) userBadges.push('Neighbourhood Guardian');
+
+        const userPotholes = reports.filter(r => r.reporter_name === currentUser.name && r.category === 'Pothole').length;
+        if (userPotholes >= 2) userBadges.push('Pothole Patrol');
+
+        const userWaste = reports.filter(r => r.reporter_name === currentUser.name && r.category === 'Waste').length;
+        if (userWaste >= 1) userBadges.push('Eco Hero');
+      }
+
+      return {
+        ...user,
+        rank,
+        badges: userBadges
+      };
+    });
+  };
+
+  const currentLeaderboard = getLeaderboardList();
+  const currentUserRank = currentLeaderboard.find(u => u.name.toLowerCase() === currentUser?.name?.toLowerCase())?.rank || 99;
+
+  const isLegendUnlocked = currentUserRank === 1;
+
+  const resolvedCount = reports.filter(r => r.reporter_name === currentUser?.name && r.status === 'Resolved').length;
+  const isGuardianUnlocked = resolvedCount >= 1;
+
+  const userPotholesCount = reports.filter(r => r.reporter_name === currentUser?.name && r.category === 'Pothole').length;
+  const isPatrolUnlocked = userPotholesCount >= 2;
+
+  const userWasteCount = reports.filter(r => r.reporter_name === currentUser?.name && r.category === 'Waste').length;
+  const isEcoHeroUnlocked = userWasteCount >= 1;
+
+  // Quest calculations
+  const realPotholesReported = reports.filter(r => r.reporter_name === currentUser?.name && r.category === 'Pothole').length;
+  const questPotholeProgress = Math.min(realPotholesReported, 2);
+  const questPotholePercent = Math.round((questPotholeProgress / 2) * 100);
+
+  const realWasteVerified = reports.filter(r => r.category === 'Waste' && votedReports.has(r.id)).length;
+  const questValidatorProgress = Math.min(realWasteVerified, 3);
+  const questValidatorPercent = Math.round((questValidatorProgress / 3) * 100);
 
   const isGuest = currentUser?.email === 'guest@communityhero.org';
 
@@ -441,19 +580,21 @@ export default function App() {
   const markersRef = useRef<{ [key: string]: maplibregl.Marker }>({});
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // --- Initialize Chatbot Welcome Message when Language Changes ---
+  // --- Initialize Chatbot Welcome Message when Language Changes (preserving history) ---
   useEffect(() => {
-    if (chatbotLanguage === 'EN') {
-      setChatMessages([
-        { sender: 'bot', text: 'Hello! I am your Civic Assistant. What hyperlocal problem would you like to report? Please describe it in detail.' }
-      ]);
-    } else {
-      setChatMessages([
-        { sender: 'bot', text: 'नमस्ते! मैं आपका नागरिक सहायक हूँ। आप किस समस्या की रिपोर्ट करना चाहते हैं? कृपया विस्तार से बताएं।' }
-      ]);
+    if (chatMessages.length <= 1) {
+      if (chatbotLanguage === 'EN') {
+        setChatMessages([
+          { sender: 'bot', text: 'Hello! I am your Civic Assistant. What hyperlocal problem would you like to report? Please describe it in detail.' }
+        ]);
+      } else {
+        setChatMessages([
+          { sender: 'bot', text: 'नमस्ते! मैं आपका नागरिक सहायक हूँ। आप किस समस्या की रिपोर्ट करना चाहते हैं? कृपया विस्तार से बताएं।' }
+        ]);
+      }
+      setChatStep(0);
+      setChatDraftReport({});
     }
-    setChatStep(0);
-    setChatDraftReport({});
   }, [chatbotLanguage]);
 
   // --- Auth: Load from localStorage ---
@@ -897,6 +1038,7 @@ export default function App() {
     switch (status.toLowerCase()) {
       case 'resolved': cls += 'bg-emerald-100 text-emerald-800 border border-emerald-200'; break;
       case 'verified': cls += 'bg-zinc-900 text-white border border-black'; break;
+      case 'reopen': cls += 'bg-red-100 text-red-800 border border-red-200'; break;
       default: cls += 'bg-zinc-100 text-zinc-600 border border-zinc-200'; break;
     }
     return <span className={cls}>{status}</span>;
@@ -914,11 +1056,12 @@ export default function App() {
   const filteredReports = reports.filter((r) => {
     const matchesCategory = filterCategory === 'All' || r.category === filterCategory;
     const matchesStatus = filterStatus === 'All' || r.status === filterStatus;
+    const matchesSeverity = filterSeverity === 'All' || r.severity === filterSeverity;
     const matchesSearch = searchQuery === '' ||
       r.description?.toLowerCase().includes(searchQuery.toLowerCase()) ||
       r.colony_area?.toLowerCase().includes(searchQuery.toLowerCase()) ||
       r.category.toLowerCase().includes(searchQuery.toLowerCase());
-    return matchesCategory && matchesStatus && matchesSearch;
+    return matchesCategory && matchesStatus && matchesSeverity && matchesSearch;
   });
 
   // --- Form Handlers ---
@@ -963,6 +1106,116 @@ export default function App() {
     );
   };
 
+  const handleStartEditReport = (report: IssueReport) => {
+    setEditCategory(report.category);
+    setEditDescription(report.description || '');
+    setEditSeverity(report.severity);
+    setEditColonyArea(report.colony_area || '');
+    setIsEditingReport(true);
+  };
+
+  const handleSaveEditReport = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedReport) return;
+    
+    const updated = reports.map((r) => {
+      if (r.id === selectedReport.id) {
+        const updatedReport = {
+          ...r,
+          category: editCategory,
+          severity: editSeverity,
+          colony_area: editColonyArea,
+          description: editDescription
+        };
+        setSelectedReport(updatedReport);
+        return updatedReport;
+      }
+      return r;
+    });
+    setReports(updated);
+    setIsEditingReport(false);
+  };
+
+  const handleUpdateOngoingPhoto = (idx: number, e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setOngoingRepairs(prev =>
+          prev.map((r, i) =>
+            i === idx ? { ...r, afterUrl: reader.result as string, status: 'Completed' } : r
+          )
+        );
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleMarkOngoingCompleted = (idx: number) => {
+    setOngoingRepairs(prev =>
+      prev.map((r, i) =>
+        i === idx ? { ...r, status: 'Completed' } : r
+      )
+    );
+  };
+
+  const handleChatPhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setChatPhoto(reader.result as string);
+        setChatMessages(prev => [...prev, {
+          sender: 'user',
+          text: '📷 [Attached Photo Evidence]'
+        }, {
+          sender: 'bot',
+          text: chatbotLanguage === 'HI'
+            ? '📷 फोटो सबूत सफलतापूर्वक संलग्न किया गया है! अब आप अपनी रिपोर्ट पूरी कर सकते हैं।'
+            : '📷 Photo evidence attached successfully! We can now proceed with your report.'
+        }]);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const submitChatReport = (draft: Partial<IssueReport>, latVal: number, lonVal: number) => {
+    const isHi = chatbotLanguage === 'HI';
+    const colArea = draft.colony_area || 'Indiranagar, Bangalore';
+    const newReport: IssueReport = {
+      id: `report-${Date.now()}`,
+      category: draft.category || 'Other',
+      severity: draft.severity || 'Medium',
+      status: 'Reported',
+      latitude: latVal,
+      longitude: lonVal,
+      original_media_url: chatPhoto,
+      s3_media_url: chatPhoto,
+      upvotes: 0,
+      downvotes: 0,
+      created_at: new Date().toISOString(),
+      description: draft.description || '',
+      colony_area: colArea,
+      reporter_name: currentUser?.name || 'citizen',
+      comments: []
+    };
+
+    const successText = isHi
+      ? `धन्यवाद! मैंने आपकी रिपोर्ट दर्ज कर ली है और इसे मैप पर पिन कर दिया है। (${latVal.toFixed(4)}, ${lonVal.toFixed(4)})`
+      : `Thank you! I have filed your report and pinned it on the map at (${latVal.toFixed(4)}, ${lonVal.toFixed(4)}).`;
+
+    startReportVerification(newReport, (success) => {
+      if (success) {
+        setChatStep(0);
+        setChatDraftReport({});
+        setChatPhoto(null);
+        setChatMessages([{ sender: 'bot', text: successText }]);
+      } else {
+        setChatMessages(prev => [...prev, { sender: 'bot', text: isHi ? 'सत्यापन विफल। कृपया वैध विवरण प्रदान करें।' : 'Verification failed. Please provide valid details.' }]);
+      }
+    });
+  };
+
   const handleCreateReport = (e: React.FormEvent) => {
     e.preventDefault();
     if (isGuest) {
@@ -979,6 +1232,10 @@ export default function App() {
       alert('We only support civic issues within India. Please select a location in India.');
       return;
     }
+    if (!formPhoto) {
+      alert('Photo is mandatory! Please upload photo evidence.');
+      return;
+    }
     const defaultPhoto = 'https://images.unsplash.com/photo-1599740831464-5eecfa64b8a5?auto=format&fit=crop&w=800&q=80';
     const originalPhoto = formPhoto || defaultPhoto;
     const newReport: IssueReport = {
@@ -990,7 +1247,7 @@ export default function App() {
       longitude: lon,
       original_media_url: originalPhoto,
       s3_media_url: originalPhoto,
-      upvotes: 1,
+      upvotes: 0,
       downvotes: 0,
       created_at: new Date().toISOString(),
       description: formDescription,
@@ -1010,14 +1267,23 @@ export default function App() {
   const handleVote = (id: string, type: 'up' | 'down') => {
     if (votedReports.has(id)) return;
     setVotedReports(prev => new Set(prev).add(id));
+    if (type === 'up') {
+      setUpvotedReports(prev => new Set(prev).add(id));
+    } else if (type === 'down') {
+      setDownvotedReports(prev => new Set(prev).add(id));
+    }
     setReports((prev) =>
       prev.map((r) => {
         if (r.id === id) {
-          return {
+          const updated = {
             ...r,
             upvotes: type === 'up' ? r.upvotes + 1 : r.upvotes,
             downvotes: type === 'down' ? r.downvotes + 1 : r.downvotes
           };
+          if (selectedReport && selectedReport.id === id) {
+            setSelectedReport(updated);
+          }
+          return updated;
         }
         return r;
       })
@@ -1105,7 +1371,8 @@ export default function App() {
     const resolutionComment: Comment = {
       author: currentUser.name,
       text: '✅ Issue has been resolved. Completion photo uploaded as proof.',
-      created_at: new Date().toISOString()
+      created_at: new Date().toISOString(),
+      image_url: resolvePhoto
     };
     setReports(prev =>
       prev.map(r =>
@@ -1120,6 +1387,138 @@ export default function App() {
       comments: [...prev.comments, resolutionComment]
     } : null);
     setResolvePhoto(null);
+  };
+
+  const handleStartWorking = () => {
+    if (!currentUser || !selectedReport) return;
+    if (currentUser.role !== 'government' && currentUser.role !== 'company') {
+      alert('Only authorized Government officials or assigned Companies can update status.');
+      return;
+    }
+    const statusComment: Comment = {
+      author: currentUser.name,
+      text: '🛠️ Assigned team has started working on this issue.',
+      created_at: new Date().toISOString()
+    };
+    setReports(prev =>
+      prev.map(r =>
+        r.id === selectedReport.id
+          ? { ...r, status: 'In Progress', comments: [...r.comments, statusComment] }
+          : r
+      )
+    );
+    setSelectedReport(prev => prev ? {
+      ...prev,
+      status: 'In Progress',
+      comments: [...prev.comments, statusComment]
+    } : null);
+  };
+
+  const handleReopenReport = () => {
+    if (!currentUser || !selectedReport) return;
+    if (currentUser.role !== 'citizen') {
+      alert('Only citizens can reopen resolved issues.');
+      return;
+    }
+    
+    const currentLikes = selectedReport.reopenLikes || [];
+    if (currentLikes.includes(currentUser.id)) {
+      alert('You have already liked this reopen request.');
+      return;
+    }
+
+    const updatedLikes = [...currentLikes, currentUser.id];
+    const reachedThreshold = updatedLikes.length >= 10;
+    
+    let newStatus = selectedReport.status;
+    let newComments = [...selectedReport.comments];
+    
+    if (reachedThreshold) {
+      newStatus = 'ReOpen';
+      const reopenComment: Comment = {
+        author: currentUser.name,
+        text: `⚠️ Citizen reopened this issue because the work was not completed satisfactorily (${updatedLikes.length}/10 likes reached).`,
+        created_at: new Date().toISOString()
+      };
+      newComments = [...newComments, reopenComment];
+    } else {
+      const supportComment: Comment = {
+        author: currentUser.name,
+        text: `👍 Liked the reopen request. Progress: ${updatedLikes.length}/10 likes.`,
+        created_at: new Date().toISOString()
+      };
+      newComments = [...newComments, supportComment];
+    }
+
+    setReports(prev =>
+      prev.map(r =>
+        r.id === selectedReport.id
+          ? { ...r, status: newStatus, reopenLikes: updatedLikes, comments: newComments }
+          : r
+      )
+    );
+    setSelectedReport(prev => prev ? {
+      ...prev,
+      status: newStatus,
+      reopenLikes: updatedLikes,
+      comments: newComments
+    } : null);
+
+    if (reachedThreshold) {
+      alert('Threshold reached! The issue has been officially Reopened.');
+    } else {
+      alert(`Thank you for your feedback. Reopen request is at ${updatedLikes.length}/10 likes.`);
+    }
+  };
+
+  const handleSimulateReopenLikes = () => {
+    if (!currentUser || !selectedReport) return;
+    if (currentUser.role !== 'citizen') {
+      alert('Only citizens can request to reopen resolved issues.');
+      return;
+    }
+
+    const currentLikes = selectedReport.reopenLikes || [];
+    let updatedLikes = [...currentLikes];
+    if (!updatedLikes.includes(currentUser.id)) {
+      updatedLikes.push(currentUser.id);
+    }
+    
+    // Add simulated likes to reach 10
+    const simUsersNeeded = 10 - updatedLikes.length;
+    for (let i = 0; i < simUsersNeeded; i++) {
+      updatedLikes.push(`sim-user-${i}-${Date.now()}`);
+    }
+
+    const reachedThreshold = updatedLikes.length >= 10;
+    let newStatus = selectedReport.status;
+    let newComments = [...selectedReport.comments];
+
+    if (reachedThreshold) {
+      newStatus = 'ReOpen';
+      const reopenComment: Comment = {
+        author: 'Community of Citizens',
+        text: `⚠️ Citizen reopened this issue because the work was not completed satisfactorily (${updatedLikes.length}/10 likes reached).`,
+        created_at: new Date().toISOString()
+      };
+      newComments = [...newComments, reopenComment];
+    }
+
+    setReports(prev =>
+      prev.map(r =>
+        r.id === selectedReport.id
+          ? { ...r, status: newStatus, reopenLikes: updatedLikes, comments: newComments }
+          : r
+      )
+    );
+    setSelectedReport(prev => prev ? {
+      ...prev,
+      status: newStatus,
+      reopenLikes: updatedLikes,
+      comments: newComments
+    } : null);
+
+    alert(`Simulated community support! Reopen request now has ${updatedLikes.length}/10 likes. Status is now ${newStatus}.`);
   };
 
   // --- Geolocation attachment for chatbot ---
@@ -1220,11 +1619,38 @@ export default function App() {
               return;
             }
 
-            setChatDraftReport(prev => ({ ...prev, latitude: latVal, longitude: lonVal }));
-            const responseText = isHi
-              ? `📍 स्थान दर्ज कर लिया गया है (${latVal.toFixed(4)}, ${lonVal.toFixed(4)})। कृपया पहले समस्या का विवरण दें:`
-              : `📍 Location captured (${latVal.toFixed(4)}, ${lonVal.toFixed(4)}). Please describe the issue you want to report first:`;
-            setChatMessages(prev => [...prev, { sender: 'bot', text: responseText }]);
+            setChatDraftReport(prev => {
+              const newDraft = { ...prev, latitude: latVal, longitude: lonVal };
+              if (newDraft.description && newDraft.category && chatPhoto) {
+                setTimeout(() => {
+                  submitChatReport(newDraft, latVal, lonVal);
+                }, 500);
+              }
+              return newDraft;
+            });
+
+            const hasDescription = !!chatDraftReport.description;
+            if (hasDescription && chatDraftReport.category && chatPhoto) {
+              const responseText = isHi
+                ? `📍 स्थान दर्ज कर लिया गया है (${latVal.toFixed(4)}, ${lonVal.toFixed(4)})। आपकी रिपोर्ट जमा की जा रही है...`
+                : `📍 Location captured (${latVal.toFixed(4)}, ${lonVal.toFixed(4)}). Submitting your report...`;
+              setChatMessages(prev => [...prev, { sender: 'bot', text: responseText }]);
+            } else if (!hasDescription) {
+              const responseText = isHi
+                ? `📍 स्थान दर्ज कर लिया गया है (${latVal.toFixed(4)}, ${lonVal.toFixed(4)})। कृपया पहले समस्या का विवरण दें:`
+                : `📍 Location captured (${latVal.toFixed(4)}, ${lonVal.toFixed(4)}). Please describe the issue you want to report first:`;
+              setChatMessages(prev => [...prev, { sender: 'bot', text: responseText }]);
+            } else if (!chatPhoto) {
+              const responseText = isHi
+                ? `📍 स्थान दर्ज कर लिया गया है (${latVal.toFixed(4)}, ${lonVal.toFixed(4)})। रिपोर्ट दर्ज करने के लिए फोटो अनिवार्य है! कृपया नीचे दिए गए कैमरा बटन से एक फोटो अपलोड करें।`
+                : `📍 Location captured (${latVal.toFixed(4)}, ${lonVal.toFixed(4)}). Photo is mandatory to submit a report! Please upload a photo using the button below.`;
+              setChatMessages(prev => [...prev, { sender: 'bot', text: responseText }]);
+            } else {
+              const responseText = isHi
+                ? `📍 स्थान दर्ज कर लिया गया है (${latVal.toFixed(4)}, ${lonVal.toFixed(4)})। कृपया समस्या की श्रेणी बताएं:`
+                : `📍 Location captured (${latVal.toFixed(4)}, ${lonVal.toFixed(4)}). Please specify the category of the issue:`;
+              setChatMessages(prev => [...prev, { sender: 'bot', text: responseText }]);
+            }
             return;
           }
         }
@@ -1255,12 +1681,14 @@ Currently collected details from prior turns (use these to avoid asking duplicat
 - Description: ${chatDraftReport.description || 'Not specified'}
 - Severity: ${chatDraftReport.severity || 'Not specified'}
 - Colony/Location: ${chatDraftReport.colony_area || (chatDraftReport.latitude ? chatDraftReport.latitude + ', ' + chatDraftReport.longitude : 'Not specified')}
+- Photo Attached: ${chatPhoto ? 'Yes' : 'No'}
 
 Instructions:
 1. Talk naturally. Be conversational. Respond to greetings and platform questions.
 2. If they are reporting an issue, look at what is missing and ask for it.
 3. If they shared location coords (e.g., '27.21793, 77.47152' or 'My location: 28.5, 77.2'), parse them.
-4. You MUST format your entire response as a single valid JSON object containing exactly these keys:
+4. If the user has attached a photo (Photo Attached: Yes), acknowledge the photo upload and proceed with completing the report. Never tell the user that you cannot see or receive images if 'Photo Attached' is Yes.
+5. You MUST format your entire response as a single valid JSON object containing exactly these keys:
 {
   "reply": "Your conversational message to the user",
   "extractedInfo": {
@@ -1306,10 +1734,25 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
             }
 
             if (payload.readyToSubmit) {
-              const finalDraft = {
-                ...chatDraftReport,
-                ...payload.extractedInfo
-              };
+              if (!chatPhoto) {
+                setChatMessages(prev => [...prev, {
+                  sender: 'bot',
+                  text: isHi
+                    ? 'रिपोर्ट दर्ज करने के लिए फोटो अनिवार्य है! कृपया नीचे दिए गए कैमरा बटन से एक फोटो अपलोड करें।'
+                    : 'Photo is mandatory to submit a report! Please upload a photo using the button below before continuing.'
+                }]);
+                return;
+              }
+
+              const finalDraft = { ...chatDraftReport };
+              if (payload.extractedInfo) {
+                if (payload.extractedInfo.category) finalDraft.category = payload.extractedInfo.category;
+                if (payload.extractedInfo.description) finalDraft.description = payload.extractedInfo.description;
+                if (payload.extractedInfo.severity) finalDraft.severity = payload.extractedInfo.severity;
+                if (payload.extractedInfo.colony_area) finalDraft.colony_area = payload.extractedInfo.colony_area;
+                if (payload.extractedInfo.latitude != null) finalDraft.latitude = payload.extractedInfo.latitude;
+                if (payload.extractedInfo.longitude != null) finalDraft.longitude = payload.extractedInfo.longitude;
+              }
 
               let lat = finalDraft.latitude || 28.6139;
               let lon = finalDraft.longitude || 77.2090;
@@ -1323,9 +1766,9 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                   status: 'Reported',
                   latitude: lat,
                   longitude: lon,
-                  original_media_url: 'https://images.unsplash.com/photo-1599740831464-5eecfa64b8a5?auto=format&fit=crop&w=800&q=80',
-                  s3_media_url: 'https://images.unsplash.com/photo-1599740831464-5eecfa64b8a5?auto=format&fit=crop&w=800&q=80',
-                  upvotes: 1,
+                  original_media_url: chatPhoto,
+                  s3_media_url: chatPhoto,
+                  upvotes: 0,
                   downvotes: 0,
                   created_at: new Date().toISOString(),
                   description: finalDraft.description || '',
@@ -1342,6 +1785,7 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                   if (success) {
                     setChatStep(0);
                     setChatDraftReport({});
+                    setChatPhoto(null);
                     setChatMessages([{ sender: 'bot', text: successText }]);
                   } else {
                     setChatMessages(prev => [...prev, { sender: 'bot', text: isHi ? 'सत्यापन विफल। कृपया वैध विवरण प्रदान करें।' : 'Verification failed. Please provide valid details.' }]);
@@ -1538,6 +1982,16 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
           return;
         }
 
+        if (!chatPhoto) {
+          setChatMessages(prev => [...prev, {
+            sender: 'bot',
+            text: isHi
+              ? 'रिपोर्ट दर्ज करने के लिए फोटो अनिवार्य है! कृपया नीचे दिए गए कैमरा बटन से एक फोटो अपलोड करें।'
+              : 'Photo is mandatory to submit a report! Please upload a photo using the button below before continuing.'
+          }]);
+          return;
+        }
+
         const newReport: IssueReport = {
           id: `report-${Date.now()}`,
           category: currentDraft.category || 'Other',
@@ -1545,9 +1999,9 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
           status: 'Reported',
           latitude: lat,
           longitude: lon,
-          original_media_url: 'https://images.unsplash.com/photo-1599740831464-5eecfa64b8a5?auto=format&fit=crop&w=800&q=80',
-          s3_media_url: 'https://images.unsplash.com/photo-1599740831464-5eecfa64b8a5?auto=format&fit=crop&w=800&q=80',
-          upvotes: 1,
+          original_media_url: chatPhoto,
+          s3_media_url: chatPhoto,
+          upvotes: 0,
           downvotes: 0,
           created_at: new Date().toISOString(),
           description: currentDraft.description || '',
@@ -1564,6 +2018,7 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
           if (success) {
             setChatStep(0);
             setChatDraftReport({});
+            setChatPhoto(null);
             setChatMessages([{ sender: 'bot', text: isHi ? `${successText} (पिन स्थान: ${lat.toFixed(4)}, ${lon.toFixed(4)})` : `${successText} I have pinned the issue to the map at ${lat.toFixed(4)}, ${lon.toFixed(4)}.` }]);
           } else {
             setChatMessages(prev => [...prev, { sender: 'bot', text: isHi ? 'सत्यापन विफल। कृपया वैध विवरण प्रदान करें।' : 'Verification failed. Please provide valid details.' }]);
@@ -1932,9 +2387,16 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                     </div>
                     <div>
                       <h3 className="text-sm font-extrabold text-black m-0">{currentUser.name}</h3>
-                      <span className={`inline-block text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded border mt-1 ${getRoleBadgeColor(currentUser.role)}`}>
-                        {currentUser.role}
-                      </span>
+                      <div className="flex items-center gap-1.5 mt-1">
+                        <span className={`inline-block text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded border ${getRoleBadgeColor(currentUser.role)}`}>
+                          {currentUser.role}
+                        </span>
+                        {currentUser.role === 'citizen' && (
+                          <span className="text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded uppercase tracking-wider">
+                            ⭐ {getCurrentUserPoints()} Hero Points
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
 
@@ -2059,12 +2521,12 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
             <h1 className="text-lg font-black tracking-tight text-black m-0 leading-tight">COMMUNITY HERO</h1>
             <div className="flex items-center gap-2 mt-0.5">
               <p className="text-[9px] text-zinc-500 uppercase tracking-widest font-bold m-0 leading-none">Civic Engagement Platform</p>
-              <span className={`inline-flex items-center gap-1 text-[7px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full border leading-none ${
-                backendConnected ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'
-              }`}>
-                <span className={`w-1 h-1 rounded-full ${backendConnected ? 'bg-emerald-500' : 'bg-amber-500'}`} />
-                {backendConnected ? 'Connected' : 'Offline Sandbox'}
-              </span>
+              {backendConnected && (
+                <span className="inline-flex items-center gap-1 text-[7px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full border leading-none bg-emerald-50 text-emerald-700 border-emerald-200">
+                  <span className="w-1 h-1 rounded-full bg-emerald-500" />
+                  Connected
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -2110,7 +2572,10 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
             }`}>
               {currentUser.name.split(' ').map(n => n[0]).join('')}
             </div>
-            <span className="text-zinc-800 font-bold max-w-[100px] truncate">{currentUser.name}</span>
+            <span className="text-zinc-800 font-bold max-w-[140px] truncate">
+              {currentUser.name}
+              {currentUser.role === 'citizen' && ` (${getCurrentUserPoints()} pts)`}
+            </span>
             <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${getRoleBadgeColor(currentUser.role)}`}>
               {currentUser.role}
             </span>
@@ -2257,13 +2722,13 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                         className="w-full bg-white border border-zinc-300 rounded-xl pl-9 pr-4 py-2 text-xs focus:outline-none focus:border-black text-zinc-900 font-semibold"
                       />
                     </div>
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-3 gap-2">
                       <div className="flex flex-col gap-1">
                         <label className="text-[9px] text-zinc-500 uppercase font-black tracking-wider">Category</label>
                         <select
                           value={filterCategory}
                           onChange={(e) => setFilterCategory(e.target.value)}
-                          className="bg-white border border-zinc-300 rounded-lg px-2 py-1.5 text-xs text-zinc-900 font-bold"
+                          className="bg-white border border-zinc-300 rounded-lg px-1.5 py-1 text-[10px] text-zinc-900 font-bold"
                         >
                           <option value="All">All Categories</option>
                           <option value="Pothole">Pothole</option>
@@ -2279,12 +2744,26 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                         <select
                           value={filterStatus}
                           onChange={(e) => setFilterStatus(e.target.value)}
-                          className="bg-white border border-zinc-300 rounded-lg px-2 py-1.5 text-xs text-zinc-900 font-bold"
+                          className="bg-white border border-zinc-300 rounded-lg px-1.5 py-1 text-[10px] text-zinc-900 font-bold"
                         >
                           <option value="All">All Statuses</option>
                           <option value="Reported">Reported</option>
                           <option value="Verified">Verified</option>
                           <option value="Resolved">Resolved</option>
+                          <option value="ReOpen">ReOpen</option>
+                        </select>
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <label className="text-[9px] text-zinc-500 uppercase font-black tracking-wider">Severity</label>
+                        <select
+                          value={filterSeverity}
+                          onChange={(e) => setFilterSeverity(e.target.value)}
+                          className="bg-white border border-zinc-300 rounded-lg px-1.5 py-1 text-[10px] text-zinc-900 font-bold"
+                        >
+                          <option value="All">All Severities</option>
+                          <option value="Minor">Minor</option>
+                          <option value="Medium">Medium</option>
+                          <option value="Severe">Severe</option>
                         </select>
                       </div>
                     </div>
@@ -2340,7 +2819,10 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                                 <span className="text-[10px] text-zinc-600 font-bold">{report.severity}</span>
                               </div>
                               <div className="flex items-center gap-2 text-[10px] text-zinc-500 font-bold">
-                                <span className="flex items-center gap-0.5"><ThumbsUp className="h-3 w-3" /> {report.upvotes}</span>
+                                <span className="flex items-center gap-0.5">
+                                  <ThumbsUp className={`h-3 w-3 ${upvotedReports.has(report.id) ? 'fill-black text-black' : ''}`} />
+                                  {report.upvotes}
+                                </span>
                                 <span className="flex items-center gap-0.5"><MessageSquare className="h-3 w-3" /> {report.comments.length}</span>
                               </div>
                             </div>
@@ -2396,7 +2878,7 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                   <div className="p-5 border-b border-zinc-200 bg-white flex items-center justify-between flex-shrink-0">
                     <div className="flex items-center gap-3">
                       <button
-                        onClick={() => { setSelectedReport(null); setResolvePhoto(null); }}
+                        onClick={() => { setSelectedReport(null); setResolvePhoto(null); setIsEditingReport(false); }}
                         className="mr-2 px-3 py-1.5 rounded-lg border border-zinc-200 text-xs font-bold uppercase tracking-wider hover:bg-zinc-50 transition-all cursor-pointer"
                       >
                         ← Back to Map
@@ -2408,12 +2890,21 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                           <span className="text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider bg-zinc-100 text-zinc-800 border border-zinc-200">
                             Severity: {selectedReport.severity}
                           </span>
+                          {currentUser && (selectedReport.reporter_name === currentUser.name || isGuest) && !isEditingReport && (
+                            <button
+                              onClick={() => handleStartEditReport(selectedReport)}
+                              className="px-2.5 py-1 rounded-lg border border-black bg-black text-white hover:bg-zinc-800 text-[10px] font-bold uppercase tracking-wider transition-all cursor-pointer flex items-center gap-1"
+                            >
+                              <Edit3 className="h-3 w-3" />
+                              Edit Report
+                            </button>
+                          )}
                         </div>
                         <p className="text-[10px] text-zinc-500 font-mono m-0 mt-1">Area / Colony: {selectedReport.colony_area || 'Unknown'}</p>
                       </div>
                     </div>
                     <button
-                      onClick={() => { setSelectedReport(null); setResolvePhoto(null); }}
+                      onClick={() => { setSelectedReport(null); setResolvePhoto(null); setIsEditingReport(false); }}
                       className="p-2 rounded-xl hover:bg-zinc-100 text-zinc-500 hover:text-black transition-all cursor-pointer"
                     >
                       <X className="h-5 w-5" />
@@ -2422,124 +2913,268 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
 
                   <div className="flex-1 flex overflow-hidden">
                     {/* Left Column: Details */}
-                    <div className="w-7/12 border-r border-zinc-200 overflow-y-auto p-6 space-y-6">
-                      <div className="space-y-2">
-                        <div className="flex justify-between items-center">
-                          <span className="text-[10px] font-black text-zinc-500 uppercase tracking-wide">YOLOv8 Privacy Blurring</span>
-                          <button onClick={() => setShowBlurOriginal(!showBlurOriginal)} className="text-xs text-black hover:underline font-bold uppercase tracking-wider cursor-pointer">
-                            Show {showBlurOriginal ? 'Blurred' : 'Original'}
-                          </button>
+                    {isEditingReport ? (
+                      <form onSubmit={handleSaveEditReport} className="w-7/12 border-r border-zinc-200 overflow-y-auto p-6 space-y-4 bg-zinc-50/50">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Edit3 className="h-5 w-5 text-black" />
+                          <h3 className="text-sm font-black text-black uppercase tracking-wider m-0">Edit Report Details</h3>
                         </div>
-                        <div className="relative rounded-2xl overflow-hidden aspect-video bg-zinc-100 border border-zinc-200 shadow-sm max-h-[380px]">
-                          <img
-                            src={showBlurOriginal ? selectedReport.original_media_url || '' : selectedReport.s3_media_url || ''}
-                            alt="Report media"
-                            className="w-full h-full object-cover"
+                        
+                        <div className="flex flex-col gap-1.5">
+                          <label className="text-[10px] text-zinc-500 uppercase font-black tracking-wider">Category</label>
+                          <select
+                            value={editCategory}
+                            onChange={(e) => setEditCategory(e.target.value)}
+                            className="bg-white border border-zinc-300 rounded-xl px-3 py-2 text-xs text-zinc-900 focus:outline-none focus:border-black font-semibold"
+                          >
+                            <option value="Pothole">Potholes</option>
+                            <option value="Waste">Waste / Garbage</option>
+                            <option value="Water Leak">Water Leak</option>
+                            <option value="Broken Infrastructure">Broken Infrastructure</option>
+                            <option value="Graffiti">Graffiti</option>
+                            <option value="Other">Other</option>
+                          </select>
+                        </div>
+
+                        <div className="flex flex-col gap-1.5">
+                          <label className="text-[10px] text-zinc-500 uppercase font-black tracking-wider">Severity</label>
+                          <select
+                            value={editSeverity}
+                            onChange={(e) => setEditSeverity(e.target.value)}
+                            className="bg-white border border-zinc-300 rounded-xl px-3 py-2 text-xs text-zinc-900 focus:outline-none focus:border-black font-semibold"
+                          >
+                            <option value="Minor">Minor</option>
+                            <option value="Medium">Medium</option>
+                            <option value="Severe">Severe</option>
+                          </select>
+                        </div>
+
+                        <div className="flex flex-col gap-1.5">
+                          <label className="text-[10px] text-zinc-500 uppercase font-black tracking-wider">Colony / Area Name</label>
+                          <input
+                            type="text"
+                            value={editColonyArea}
+                            onChange={(e) => setEditColonyArea(e.target.value)}
+                            required
+                            className="bg-white border border-zinc-300 rounded-xl px-3 py-2 text-xs text-zinc-900 focus:outline-none focus:border-black font-semibold"
                           />
-                          <div className="absolute bottom-3 left-3 bg-black/85 px-2.5 py-1.5 rounded-lg text-[9px] font-bold text-white uppercase tracking-wider">
-                            {showBlurOriginal ? 'Original Image' : 'Faces & Plates Anonymized'}
-                          </div>
                         </div>
-                      </div>
 
-                      <div className="bg-zinc-50 border border-zinc-200 p-5 rounded-2xl">
-                        <h3 className="text-[10px] font-black text-zinc-500 uppercase tracking-wider mb-2">Problem Statement</h3>
-                        <p className="text-sm text-zinc-700 font-medium leading-relaxed m-0">
-                          {selectedReport.description || 'No description provided.'}
-                        </p>
-                      </div>
+                        <div className="flex flex-col gap-1.5">
+                          <label className="text-[10px] text-zinc-500 uppercase font-black tracking-wider">Description</label>
+                          <textarea
+                            value={editDescription}
+                            onChange={(e) => setEditDescription(e.target.value)}
+                            required
+                            className="bg-white border border-zinc-300 rounded-xl px-3 py-2.5 text-xs text-zinc-900 focus:outline-none focus:border-black h-32 resize-none font-semibold leading-relaxed"
+                          />
+                        </div>
 
-                      {/* Vote section with single-vote enforcement */}
-                      <div className="bg-zinc-50 border border-zinc-200 p-5 rounded-2xl space-y-4">
-                        <div className="flex justify-between items-center">
-                          <span className="text-[10px] font-black text-zinc-500 uppercase tracking-wider">Validation Rate</span>
-                          <span className="text-xs font-black text-black">
-                            {Math.round((selectedReport.upvotes / (selectedReport.upvotes + selectedReport.downvotes || 1)) * 100)}% Verified
-                          </span>
-                        </div>
-                        <div className="h-2.5 w-full bg-zinc-200 rounded-full overflow-hidden">
-                          <div className="h-full bg-black" style={{ width: `${(selectedReport.upvotes / (selectedReport.upvotes + selectedReport.downvotes || 1)) * 100}%` }} />
-                        </div>
-                        <div className="flex justify-between items-center text-xs text-zinc-500 font-bold">
-                          <span>{selectedReport.upvotes} Upvotes</span>
-                          <span>{selectedReport.downvotes} Downvotes</span>
-                        </div>
-                        <div className="flex gap-3 pt-1">
+                        <div className="flex gap-3 pt-3">
                           <button
-                            onClick={() => handleVote(selectedReport.id, 'up')}
-                            disabled={votedReports.has(selectedReport.id)}
-                            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-bold transition-all ${
-                              votedReports.has(selectedReport.id)
-                                ? 'bg-zinc-200 text-zinc-400 cursor-not-allowed border border-zinc-200'
-                                : 'bg-black hover:bg-zinc-800 border border-black text-white cursor-pointer'
-                            }`}
+                            type="submit"
+                            className="flex-1 bg-black hover:bg-zinc-800 text-white py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all cursor-pointer shadow-sm hover:shadow-md"
                           >
-                            <ThumbsUp className="h-4 w-4" />
-                            {votedReports.has(selectedReport.id) ? 'Already Voted' : 'Verify Issue'}
+                            Save Changes
                           </button>
                           <button
-                            onClick={() => handleVote(selectedReport.id, 'down')}
-                            disabled={votedReports.has(selectedReport.id)}
-                            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-bold transition-all ${
-                              votedReports.has(selectedReport.id)
-                                ? 'bg-zinc-100 text-zinc-400 cursor-not-allowed border border-zinc-200'
-                                : 'bg-white hover:bg-zinc-50 border border-zinc-300 text-zinc-800 cursor-pointer'
-                            }`}
+                            type="button"
+                            onClick={() => setIsEditingReport(false)}
+                            className="flex-1 border border-zinc-350 hover:bg-zinc-100 text-zinc-700 py-3 rounded-xl text-xs font-bold uppercase tracking-wider transition-all cursor-pointer"
                           >
-                            <ThumbsDown className="h-4 w-4" />
-                            {votedReports.has(selectedReport.id) ? 'Already Voted' : 'Flag as Inaccurate'}
+                            Cancel
                           </button>
                         </div>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="bg-zinc-50 p-4 rounded-xl border border-zinc-200">
-                          <span className="text-[10px] text-zinc-500 font-black uppercase tracking-wider">Reported Date</span>
-                          <p className="font-extrabold text-black mt-1 text-sm">{new Date(selectedReport.created_at).toLocaleString()}</p>
-                        </div>
-                        <div className="bg-zinc-50 p-4 rounded-xl border border-zinc-200">
-                          <span className="text-[10px] text-zinc-500 font-black uppercase tracking-wider">Severity Level</span>
-                          <p className="font-extrabold mt-1 text-black text-sm">{selectedReport.severity}</p>
-                        </div>
-                      </div>
-
-                      {/* Resolution Authority — only for Government/Company */}
-                      {(currentUser.role === 'government' || currentUser.role === 'company') && selectedReport.status !== 'Resolved' && (
-                        <div className="bg-amber-50 border border-amber-200 p-5 rounded-2xl space-y-3">
-                          <div className="flex items-center gap-2">
-                            <Landmark className="h-4 w-4 text-amber-700" />
-                            <h3 className="text-[10px] font-black text-amber-700 uppercase tracking-wider m-0">Resolution Authority</h3>
+                      </form>
+                    ) : (
+                      <div className="w-7/12 border-r border-zinc-200 overflow-y-auto p-6 space-y-6">
+                        <div className="space-y-2">
+                          <div className="flex justify-between items-center">
+                            <span className="text-[10px] font-black text-zinc-500 uppercase tracking-wide">YOLOv8 Privacy Blurring</span>
+                            <button onClick={() => setShowBlurOriginal(!showBlurOriginal)} className="text-xs text-black hover:underline font-bold uppercase tracking-wider cursor-pointer">
+                              Show {showBlurOriginal ? 'Blurred' : 'Original'}
+                            </button>
                           </div>
-                          <p className="text-xs text-amber-800 font-medium">Upload a photo of the completed work to mark this issue as resolved.</p>
-                          {resolvePhoto ? (
-                            <div className="relative rounded-xl overflow-hidden aspect-video border border-amber-300 bg-amber-100">
-                              <img src={resolvePhoto} alt="Resolution proof" className="w-full h-full object-cover" />
-                              <button type="button" onClick={() => setResolvePhoto(null)} className="absolute top-2 right-2 bg-black/80 hover:bg-black text-white p-1 rounded-full cursor-pointer">
-                                <X className="h-4 w-4" />
+                          <div className="relative rounded-2xl overflow-hidden aspect-video bg-zinc-100 border border-zinc-200 shadow-sm max-h-[380px]">
+                            <img
+                              src={showBlurOriginal ? selectedReport.original_media_url || '' : selectedReport.s3_media_url || ''}
+                              alt="Report media"
+                              className="w-full h-full object-cover"
+                            />
+                            <div className="absolute bottom-3 left-3 bg-black/85 px-2.5 py-1.5 rounded-lg text-[9px] font-bold text-white uppercase tracking-wider">
+                              {showBlurOriginal ? 'Original Image' : 'Faces & Plates Anonymized'}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="bg-zinc-50 border border-zinc-200 p-5 rounded-2xl">
+                          <h3 className="text-[10px] font-black text-zinc-500 uppercase tracking-wider mb-2">Problem Statement</h3>
+                          <p className="text-sm text-zinc-700 font-medium leading-relaxed m-0">
+                            {selectedReport.description || 'No description provided.'}
+                          </p>
+                        </div>
+
+                        {/* Vote / Reopen section based on status and role */}
+                        {currentUser.role === 'citizen' && selectedReport.status === 'Resolved' ? (
+                          <div className="bg-red-50 border border-red-200 p-5 rounded-2xl space-y-4 shadow-sm">
+                            <div className="flex items-center gap-2">
+                              <AlertTriangle className="h-4 w-4 text-red-700" />
+                              <h3 className="text-[10px] font-black text-red-700 uppercase tracking-wider m-0">Reopen Request</h3>
+                            </div>
+                            <p className="text-[11px] text-red-700 font-medium leading-relaxed m-0">
+                              Municipal teams have marked this issue as resolved. If you believe the work was not completed satisfactorily, you can vote to reopen it. 10 citizen likes are required.
+                            </p>
+                            
+                            {/* Like Progress Bar */}
+                            <div className="space-y-1">
+                              <div className="flex justify-between items-center text-[10px] text-red-700 font-black">
+                                <span>REOPEN LIKES</span>
+                                <span>{(selectedReport.reopenLikes || []).length} / 10</span>
+                              </div>
+                              <div className="h-2 w-full bg-red-100 rounded-full overflow-hidden border border-red-200">
+                                <div 
+                                  className="h-full bg-red-600 rounded-full transition-all duration-300" 
+                                  style={{ width: `${Math.min(((selectedReport.reopenLikes || []).length / 10) * 100, 100)}%` }} 
+                                />
+                              </div>
+                            </div>
+
+                            <div className="flex gap-2">
+                              <button
+                                onClick={handleReopenReport}
+                                disabled={(selectedReport.reopenLikes || []).includes(currentUser.id)}
+                                className={`flex-1 py-3 text-white rounded-xl text-xs font-black uppercase tracking-widest transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-sm ${
+                                  (selectedReport.reopenLikes || []).includes(currentUser.id)
+                                    ? 'bg-red-300 cursor-not-allowed'
+                                    : 'bg-red-650 hover:bg-red-700'
+                                }`}
+                              >
+                                <ThumbsUp className="h-3.5 w-3.5" />
+                                {(selectedReport.reopenLikes || []).includes(currentUser.id) 
+                                  ? 'Already Supported' 
+                                  : 'Like to Reopen'}
+                              </button>
+                              <button
+                                onClick={handleSimulateReopenLikes}
+                                className="px-3 bg-zinc-800 hover:bg-black text-white rounded-xl text-xs font-black uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-1 flex-shrink-0"
+                                title="Simulate 9 other citizen likes for testing"
+                              >
+                                ⚡ Simulate
                               </button>
                             </div>
-                          ) : (
-                            <label className="border-2 border-dashed border-amber-300 hover:border-amber-500 rounded-xl p-6 flex flex-col items-center justify-center gap-2 cursor-pointer transition-all bg-white">
-                              <Camera className="h-6 w-6 text-amber-500" />
-                              <span className="text-xs text-amber-700 font-bold">Upload Completion Photo</span>
-                              <input type="file" accept="image/*" onChange={handleResolvePhotoUpload} className="hidden" />
-                            </label>
-                          )}
-                          <button
-                            onClick={handleResolveReport}
-                            disabled={!resolvePhoto}
-                            className={`w-full py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${
-                              resolvePhoto
-                                ? 'bg-amber-600 hover:bg-amber-700 text-white cursor-pointer'
-                                : 'bg-zinc-200 text-zinc-400 cursor-not-allowed'
-                            }`}
-                          >
-                            <CheckCircle2 className="h-4 w-4 inline mr-1.5" />
-                            Confirm Resolution
-                          </button>
+                          </div>
+                        ) : (
+                          /* Vote section with single-vote enforcement */
+                          <div className="bg-zinc-50 border border-zinc-200 p-5 rounded-2xl space-y-4">
+                            <div className="flex justify-between items-center">
+                              <span className="text-[10px] font-black text-zinc-500 uppercase tracking-wider">Validation Rate</span>
+                              <span className="text-xs font-black text-black">
+                                {Math.round((selectedReport.upvotes / (selectedReport.upvotes + selectedReport.downvotes || 1)) * 100)}% Verified
+                              </span>
+                            </div>
+                            <div className="h-2.5 w-full bg-zinc-200 rounded-full overflow-hidden">
+                              <div className="h-full bg-black" style={{ width: `${(selectedReport.upvotes / (selectedReport.upvotes + selectedReport.downvotes || 1)) * 100}%` }} />
+                            </div>
+                            <div className="flex justify-between items-center text-xs text-zinc-500 font-bold">
+                              <span>{selectedReport.upvotes} Upvotes</span>
+                              <span>{selectedReport.downvotes} Downvotes</span>
+                            </div>
+                            <div className="flex gap-3 pt-1">
+                              <button
+                                onClick={() => handleVote(selectedReport.id, 'up')}
+                                disabled={votedReports.has(selectedReport.id)}
+                                className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-bold transition-all ${
+                                  votedReports.has(selectedReport.id)
+                                    ? 'bg-zinc-200 text-zinc-400 cursor-not-allowed border border-zinc-200'
+                                    : 'bg-black hover:bg-zinc-800 border border-black text-white cursor-pointer'
+                                }`}
+                              >
+                                <ThumbsUp className={`h-4 w-4 ${upvotedReports.has(selectedReport.id) ? 'fill-black text-black' : ''}`} />
+                                {votedReports.has(selectedReport.id) ? 'Already Voted' : 'Verify Issue'}
+                              </button>
+                              <button
+                                onClick={() => handleVote(selectedReport.id, 'down')}
+                                disabled={votedReports.has(selectedReport.id)}
+                                className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-bold transition-all ${
+                                  votedReports.has(selectedReport.id)
+                                    ? 'bg-zinc-100 text-zinc-400 cursor-not-allowed border border-zinc-200'
+                                    : 'bg-white hover:bg-zinc-50 border border-zinc-300 text-zinc-800 cursor-pointer'
+                                }`}
+                              >
+                                <ThumbsDown className={`h-4 w-4 ${downvotedReports.has(selectedReport.id) ? 'fill-black text-black' : ''}`} />
+                                {votedReports.has(selectedReport.id) ? 'Already Voted' : 'Flag as Inaccurate'}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="bg-zinc-50 p-4 rounded-xl border border-zinc-200">
+                            <span className="text-[10px] text-zinc-500 font-black uppercase tracking-wider">Reported Date</span>
+                            <p className="font-extrabold text-black mt-1 text-sm">{new Date(selectedReport.created_at).toLocaleString()}</p>
+                          </div>
+                          <div className="bg-zinc-50 p-4 rounded-xl border border-zinc-200">
+                            <span className="text-[10px] text-zinc-500 font-black uppercase tracking-wider">Severity Level</span>
+                            <p className="font-extrabold mt-1 text-black text-sm">{selectedReport.severity}</p>
+                          </div>
                         </div>
-                      )}
-                    </div>
+
+                        {/* Resolution Authority — only for Government/Company */}
+                        {(currentUser.role === 'government' || currentUser.role === 'company') && selectedReport.status !== 'Resolved' && (
+                          <div className="bg-amber-50 border border-amber-200 p-5 rounded-2xl space-y-4 shadow-sm">
+                            <div className="flex items-center gap-2">
+                              <Landmark className="h-4 w-4 text-amber-700" />
+                              <h3 className="text-[10px] font-black text-amber-700 uppercase tracking-wider m-0">Resolution Authority</h3>
+                            </div>
+
+                            {selectedReport.status !== 'In Progress' && (
+                              <div className="space-y-2 border-b border-amber-200/50 pb-4">
+                                <h4 className="text-[9px] font-black text-amber-800 uppercase tracking-wider">Stage 1: Acknowledge & Start Work</h4>
+                                <p className="text-[11px] text-amber-700 font-medium">Mark this issue as 'In Progress' to notify citizens that municipal teams have commenced work.</p>
+                                <button
+                                  onClick={handleStartWorking}
+                                  className="w-full py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                                >
+                                  <Clock className="h-4 w-4" />
+                                  Start Working on Issue
+                                </button>
+                              </div>
+                            )}
+
+                            <div className="space-y-3 pt-1">
+                              <h4 className="text-[9px] font-black text-amber-800 uppercase tracking-wider">Stage 2: Upload Proof & Complete</h4>
+                              <p className="text-[11px] text-amber-700 font-medium">Upload a photo of the completed work to mark this issue as resolved.</p>
+                              {resolvePhoto ? (
+                                <div className="relative rounded-xl overflow-hidden aspect-video border border-amber-300 bg-amber-100">
+                                  <img src={resolvePhoto} alt="Resolution proof" className="w-full h-full object-cover" />
+                                  <button type="button" onClick={() => setResolvePhoto(null)} className="absolute top-2 right-2 bg-black/85 hover:bg-black text-white p-1 rounded-full cursor-pointer shadow">
+                                    <X className="h-4 w-4" />
+                                  </button>
+                                </div>
+                              ) : (
+                                <label className="border-2 border-dashed border-amber-300 hover:border-amber-500 rounded-xl p-6 flex flex-col items-center justify-center gap-2 cursor-pointer transition-all bg-white shadow-sm">
+                                  <Camera className="h-6 w-6 text-amber-500" />
+                                  <span className="text-xs text-amber-700 font-bold">Upload Completion Photo</span>
+                                  <input type="file" accept="image/*" onChange={handleResolvePhotoUpload} className="hidden" />
+                                </label>
+                              )}
+                              <button
+                                onClick={handleResolveReport}
+                                disabled={!resolvePhoto}
+                                className={`w-full py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${
+                                  resolvePhoto
+                                    ? 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer shadow-sm hover:shadow-md'
+                                    : 'bg-zinc-200 text-zinc-400 cursor-not-allowed'
+                                }`}
+                              >
+                                <CheckCircle2 className="h-4 w-4 inline mr-1.5" />
+                                Confirm Resolution
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     {/* Right Column: Discussion */}
                     <div className="w-5/12 flex flex-col bg-zinc-50/30 overflow-hidden">
@@ -2560,6 +3195,11 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                                 <span>{new Date(comment.created_at).toLocaleDateString()}</span>
                               </div>
                               <p className="text-xs text-zinc-700 font-medium leading-relaxed">{comment.text}</p>
+                              {comment.image_url && (
+                                <div className="mt-2 rounded-xl overflow-hidden aspect-video border border-zinc-200 bg-zinc-50 max-h-[160px] shadow-sm">
+                                  <img src={comment.image_url} alt="Proof of work" className="w-full h-full object-cover" />
+                                </div>
+                              )}
                             </div>
                           ))
                         )}
@@ -2641,14 +3281,34 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                       <div ref={chatEndRef} />
                     </div>
                     <div className="p-3 border-t border-zinc-200 bg-white flex-shrink-0">
-                      <button
-                        type="button"
-                        onClick={handleAttachLocation}
-                        className="w-full flex items-center justify-center gap-1.5 mb-2 text-[10px] font-bold text-zinc-500 hover:text-black bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 hover:border-zinc-400 rounded-xl py-1.5 transition-all cursor-pointer"
-                      >
-                        <MapPin className="h-3.5 w-3.5" />
-                        {chatbotLanguage === 'HI' ? '📍 लाइव स्थान साझा करें' : '📍 Attach Live Location'}
-                      </button>
+                      {chatPhoto && (
+                        <div className="relative rounded-xl overflow-hidden aspect-video border border-zinc-250 bg-zinc-50 max-h-[100px] mb-2 shadow-sm">
+                          <img src={chatPhoto} alt="Chat evidence preview" className="w-full h-full object-cover" />
+                          <button
+                            type="button"
+                            onClick={() => setChatPhoto(null)}
+                            className="absolute top-1.5 right-1.5 bg-black/85 hover:bg-black text-white p-1 rounded-full cursor-pointer shadow"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      )}
+                      
+                      <div className="flex gap-2 mb-2">
+                        <button
+                          type="button"
+                          onClick={handleAttachLocation}
+                          className="flex-1 flex items-center justify-center gap-1 text-[10px] font-bold text-zinc-500 hover:text-black bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 hover:border-zinc-400 rounded-xl py-2 transition-all cursor-pointer"
+                        >
+                          <MapPin className="h-3.5 w-3.5" />
+                          {chatbotLanguage === 'HI' ? 'स्थान' : 'Location'}
+                        </button>
+                        <label className="flex-1 flex items-center justify-center gap-1.5 text-[10px] font-bold text-zinc-500 hover:text-black bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 hover:border-zinc-400 rounded-xl py-2 transition-all cursor-pointer">
+                          <Camera className="h-3.5 w-3.5" />
+                          <span>{chatbotLanguage === 'HI' ? 'फोटो' : 'Photo'}</span>
+                          <input type="file" accept="image/*" onChange={handleChatPhotoUpload} className="hidden" />
+                        </label>
+                      </div>
                       <div className="flex gap-2">
                         <input
                           type="text"
@@ -2724,9 +3384,8 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                     </div>
                   </div>
                   <div className="bg-zinc-800 border border-zinc-700 px-5 py-4 rounded-2xl text-center flex flex-col justify-center min-w-[140px] flex-shrink-0">
-                    <span className="text-[10px] text-zinc-400 uppercase font-black tracking-wider">Total Claimed</span>
-                    <span className="text-xl font-black text-white mt-0.5">₹{totalClaimed.toLocaleString()}</span>
-                    <span className="text-[8px] text-emerald-450 font-bold uppercase mt-1">Next: ₹1,000</span>
+                    <span className="text-[10px] text-zinc-400 uppercase font-black tracking-wider">Next</span>
+                    <span className="text-xl font-black text-white mt-0.5">₹1,000</span>
                   </div>
                 </div>
 
@@ -2737,25 +3396,49 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                     <span className="text-xs font-black uppercase tracking-wider text-black">My Badge Case</span>
                   </div>
                   <div className="grid grid-cols-4 gap-2">
-                    <div className="flex flex-col items-center p-2 rounded-xl bg-white border border-zinc-200 group relative">
-                      <span className="text-lg">🥇</span>
-                      <span className="text-[8px] font-black uppercase text-zinc-500 mt-1">Legend</span>
-                      <div className="absolute bottom-full mb-2 hidden group-hover:block bg-zinc-900 text-white text-[8px] font-bold py-1 px-2 rounded whitespace-nowrap shadow-lg">Earned by rank #1</div>
+                    <div className={`flex flex-col items-center p-2 rounded-xl border group relative transition-all ${
+                      isLegendUnlocked 
+                        ? 'bg-white border-zinc-200 shadow-sm' 
+                        : 'bg-zinc-100 border-zinc-200 opacity-50'
+                    }`}>
+                      <span className={`text-lg ${isLegendUnlocked ? '' : 'filter grayscale'}`}>🥇</span>
+                      <span className={`text-[8px] font-black uppercase mt-1 ${isLegendUnlocked ? 'text-zinc-700' : 'text-zinc-400'}`}>Legend</span>
+                      <div className="absolute bottom-full mb-2 hidden group-hover:block bg-zinc-900 text-white text-[8px] font-bold py-1 px-2 rounded whitespace-nowrap shadow-lg">
+                        {isLegendUnlocked ? 'Earned: Rank #1 on Leaderboard!' : 'Earned by rank #1'}
+                      </div>
                     </div>
-                    <div className="flex flex-col items-center p-2 rounded-xl bg-white border border-zinc-200 group relative">
-                      <span className="text-lg">🛡️</span>
-                      <span className="text-[8px] font-black uppercase text-zinc-500 mt-1">Guardian</span>
-                      <div className="absolute bottom-full mb-2 hidden group-hover:block bg-zinc-900 text-white text-[8px] font-bold py-1 px-2 rounded whitespace-nowrap shadow-lg">Earned for 5 resolutions</div>
+                    <div className={`flex flex-col items-center p-2 rounded-xl border group relative transition-all ${
+                      isGuardianUnlocked 
+                        ? 'bg-white border-zinc-200 shadow-sm' 
+                        : 'bg-zinc-100 border-zinc-200 opacity-50'
+                    }`}>
+                      <span className={`text-lg ${isGuardianUnlocked ? '' : 'filter grayscale'}`}>🛡️</span>
+                      <span className={`text-[8px] font-black uppercase mt-1 ${isGuardianUnlocked ? 'text-zinc-700' : 'text-zinc-400'}`}>Guardian</span>
+                      <div className="absolute bottom-full mb-2 hidden group-hover:block bg-zinc-900 text-white text-[8px] font-bold py-1 px-2 rounded whitespace-nowrap shadow-lg">
+                        {isGuardianUnlocked ? 'Earned: 1+ reported issue resolved!' : 'Earned for 1+ reported issue resolved'}
+                      </div>
                     </div>
-                    <div className="flex flex-col items-center p-2 rounded-xl bg-zinc-150 border border-zinc-200 opacity-50 group relative">
-                      <span className="text-lg filter grayscale">🚗</span>
-                      <span className="text-[8px] font-black uppercase text-zinc-400 mt-1">Patrol</span>
-                      <div className="absolute bottom-full mb-2 hidden group-hover:block bg-zinc-900 text-white text-[8px] font-bold py-1 px-2 rounded whitespace-nowrap shadow-lg">Pothole Patrol (3/5 filed)</div>
+                    <div className={`flex flex-col items-center p-2 rounded-xl border group relative transition-all ${
+                      isPatrolUnlocked 
+                        ? 'bg-white border-zinc-200 shadow-sm' 
+                        : 'bg-zinc-100 border-zinc-200 opacity-50'
+                    }`}>
+                      <span className={`text-lg ${isPatrolUnlocked ? '' : 'filter grayscale'}`}>🚗</span>
+                      <span className={`text-[8px] font-black uppercase mt-1 ${isPatrolUnlocked ? 'text-zinc-700' : 'text-zinc-400'}`}>Patrol</span>
+                      <div className="absolute bottom-full mb-2 hidden group-hover:block bg-zinc-900 text-white text-[8px] font-bold py-1 px-2 rounded whitespace-nowrap shadow-lg">
+                        Pothole Patrol ({userPotholesCount}/2 filed)
+                      </div>
                     </div>
-                    <div className="flex flex-col items-center p-2 rounded-xl bg-zinc-150 border border-zinc-200 opacity-50 group relative">
-                      <span className="text-lg filter grayscale">🌱</span>
-                      <span className="text-[8px] font-black uppercase text-zinc-400 mt-1">Eco Hero</span>
-                      <div className="absolute bottom-full mb-2 hidden group-hover:block bg-zinc-900 text-white text-[8px] font-bold py-1 px-2 rounded whitespace-nowrap shadow-lg">Waste cleanup drive (0/1 verified)</div>
+                    <div className={`flex flex-col items-center p-2 rounded-xl border group relative transition-all ${
+                      isEcoHeroUnlocked 
+                        ? 'bg-white border-zinc-200 shadow-sm' 
+                        : 'bg-zinc-100 border-zinc-200 opacity-50'
+                    }`}>
+                      <span className={`text-lg ${isEcoHeroUnlocked ? '' : 'filter grayscale'}`}>🌱</span>
+                      <span className={`text-[8px] font-black uppercase mt-1 ${isEcoHeroUnlocked ? 'text-zinc-700' : 'text-zinc-400'}`}>Eco Hero</span>
+                      <div className="absolute bottom-full mb-2 hidden group-hover:block bg-zinc-900 text-white text-[8px] font-bold py-1 px-2 rounded whitespace-nowrap shadow-lg">
+                        Waste cleanup drive ({userWasteCount}/1 filed)
+                      </div>
                     </div>
                   </div>
                   <div className="text-[8px] text-zinc-400 font-extrabold uppercase mt-2 tracking-wide text-center">Unlock badges to boost score multiplier!</div>
@@ -2775,21 +3458,35 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                       <div className="col-span-4 pl-8">Milestones</div>
                     </div>
                     <div className="divide-y divide-zinc-200">
-                      {MOCK_LEADERBOARDS[leaderboardFilter].map((user) => {
+                      {currentLeaderboard.map((user) => {
                         // Custom impact text mappings for each user
                         let impactTxt = "Verified 2 road reports";
                         if (user.name === 'Arjun Patel') impactTxt = "Verified 14 broken infrastructure reports";
                         else if (user.name === 'Priya Sharma') impactTxt = "Verified 8 garbage reports";
                         else if (user.name === 'Vikram Singh') impactTxt = "Verified 6 water leak reports";
                         else if (user.name === 'Ananya Gupta') impactTxt = "Verified 3 broken infrastructure reports";
+                        else if (currentUser && user.name.toLowerCase() === currentUser.name.toLowerCase()) {
+                          const userPotholes = reports.filter(r => r.reporter_name === currentUser.name && r.category === 'Pothole').length;
+                          const userWaste = reports.filter(r => r.reporter_name === currentUser.name && r.category === 'Waste').length;
+                          const userWater = reports.filter(r => r.reporter_name === currentUser.name && r.category === 'Water Leak').length;
+                          const userBroken = reports.filter(r => r.reporter_name === currentUser.name && r.category === 'Broken Infrastructure').length;
+                          const userOther = reports.filter(r => r.reporter_name === currentUser.name && r.category === 'Other').length;
+                          
+                          if (userPotholes > 0) impactTxt = `Reported ${userPotholes} pothole reports`;
+                          else if (userWaste > 0) impactTxt = `Reported ${userWaste} waste reports`;
+                          else if (userWater > 0) impactTxt = `Reported ${userWater} water leak reports`;
+                          else if (userBroken > 0) impactTxt = `Reported ${userBroken} infrastructure reports`;
+                          else if (userOther > 0) impactTxt = `Reported ${userOther} reports`;
+                          else impactTxt = "No reports filed yet";
+                        }
 
                         return (
-                          <div key={user.rank} className="grid grid-cols-12 p-4 py-5 items-center text-sm hover:bg-zinc-50/50 transition-all">
+                          <div key={user.name} className="grid grid-cols-12 p-4 py-5 items-center text-sm hover:bg-zinc-50/50 transition-all">
                             <div className="col-span-1 text-center font-black text-zinc-500">
                               {user.rank === 1 ? '🥇' : user.rank === 2 ? '🥈' : user.rank === 3 ? '🥉' : `#${user.rank}`}
                             </div>
                             <div className="col-span-5 flex items-center gap-3">
-                              <div className={`w-9 h-9 rounded-full ${user.avatarColor} flex items-center justify-center text-xs font-bold text-white shadow-sm`}>
+                              <div className={`w-9 h-9 rounded-full ${user.avatarColor || 'bg-zinc-500'} flex items-center justify-center text-xs font-bold text-white shadow-sm`}>
                                 {user.name.split(' ').map(n => n[0]).join('')}
                               </div>
                               <div className="flex flex-col min-w-0">
@@ -2832,11 +3529,11 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                           Report 2 road issues in Indiranagar area before Sunday night.
                         </p>
                         <div className="flex items-center justify-between text-[9px] font-black uppercase tracking-wider text-zinc-405">
-                          <span>Progress: 1 / 2 reported</span>
-                          <span className="text-black">50%</span>
+                          <span>Progress: {questPotholeProgress} / 2 reported</span>
+                          <span className="text-black">{questPotholePercent}%</span>
                         </div>
                         <div className="h-1.5 w-full bg-zinc-100 rounded-full overflow-hidden border border-zinc-200">
-                          <div className="h-full bg-black rounded-full" style={{ width: '50%' }} />
+                          <div className="h-full bg-black rounded-full" style={{ width: `${questPotholePercent}%` }} />
                         </div>
                       </div>
 
@@ -2849,15 +3546,75 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                           Verify 3 pending waste management entries near your colony.
                         </p>
                         <div className="flex items-center justify-between text-[9px] font-black uppercase tracking-wider text-zinc-405">
-                          <span>Progress: 0 / 3 verified</span>
-                          <span className="text-black">0%</span>
+                          <span>Progress: {questValidatorProgress} / 3 verified</span>
+                          <span className="text-black">{questValidatorPercent}%</span>
                         </div>
                         <div className="h-1.5 w-full bg-zinc-100 rounded-full overflow-hidden border border-zinc-200">
-                          <div className="h-full bg-black rounded-full" style={{ width: '0%' }} />
+                          <div className="h-full bg-black rounded-full" style={{ width: `${questValidatorPercent}%` }} />
                         </div>
                       </div>
                     </div>
                   </div>
+
+                  {/* Real Points and Rank Section */}
+                  {currentUser && (
+                    <div className="bg-zinc-50 border border-zinc-200 rounded-3xl p-5 space-y-4 shadow-sm">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-xs font-black uppercase text-black m-0 tracking-wider">Your Standings</h3>
+                        <span className="text-[8px] bg-black text-white px-2 py-0.5 rounded-full font-bold uppercase">Live Stats</span>
+                      </div>
+                      <div className="space-y-3">
+                        <div className="bg-white border border-zinc-200 rounded-2xl p-4 flex items-center justify-between shadow-sm hover:border-zinc-300 transition-all">
+                          <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-full bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600 font-extrabold text-sm">
+                              ⭐
+                            </div>
+                            <div className="flex flex-col">
+                              <span className="text-[8px] text-zinc-400 font-black uppercase tracking-wider">Total Points</span>
+                              <span className="text-xs font-bold text-zinc-800">Earned Hero Points</span>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <span className="text-lg font-black text-black">{getCurrentUserPoints()}</span>
+                            <span className="text-[8px] text-zinc-400 font-bold block">pts</span>
+                          </div>
+                        </div>
+
+                        {currentUser.role === 'citizen' ? (
+                          <div className="bg-white border border-zinc-200 rounded-2xl p-4 flex items-center justify-between shadow-sm hover:border-zinc-300 transition-all">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full bg-amber-50 border border-amber-100 flex items-center justify-center text-amber-600 font-extrabold text-sm">
+                                🏆
+                              </div>
+                              <div className="flex flex-col">
+                                <span className="text-[8px] text-zinc-400 font-black uppercase tracking-wider">Leaderboard Rank</span>
+                                <span className="text-xs font-bold text-zinc-800">Global Standings</span>
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              <span className="text-lg font-black text-black">#{currentUserRank}</span>
+                              <span className="text-[8px] text-zinc-400 font-bold block">rank</span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="bg-white border border-zinc-200 rounded-2xl p-4 flex items-center justify-between shadow-sm opacity-75">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-600 font-extrabold text-sm">
+                                💼
+                              </div>
+                              <div className="flex flex-col">
+                                <span className="text-[8px] text-zinc-400 font-black uppercase tracking-wider">Account Role</span>
+                                <span className="text-xs font-bold text-zinc-800">Authorized Agency</span>
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              <span className="text-xs font-black uppercase text-zinc-700">{currentUser.role}</span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
               </div>
@@ -2965,7 +3722,7 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                   <p className="text-[10px] text-zinc-500">Live before and after validation feeds from ground teams.</p>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  {MOCK_ONGOING_REPAIRS.map((repair, idx) => (
+                  {ongoingRepairs.map((repair, idx) => (
                     <div key={idx} className="bg-white border border-zinc-200 rounded-2xl p-4 space-y-3">
                       <div className="flex justify-between items-center">
                         <div>
@@ -2996,13 +3753,103 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                         </div>
                         <div className="space-y-1">
                           <span className="text-[8px] font-black text-zinc-400 uppercase tracking-widest block text-center">After / Current</span>
-                          <div className="rounded-lg overflow-hidden h-28 border border-zinc-250">
-                            <img src={repair.afterUrl} alt="After repair" className="w-full h-full object-cover" />
+                          <div className="rounded-lg overflow-hidden h-28 border border-zinc-250 bg-zinc-50 relative flex items-center justify-center">
+                            {repair.afterUrl ? (
+                              <img src={repair.afterUrl} alt="After repair" className="w-full h-full object-cover" />
+                            ) : (
+                              <div className="w-full h-full flex flex-col items-center justify-center gap-1 bg-zinc-55">
+                                <span className="text-[9px] text-zinc-400 font-bold uppercase tracking-wider">Awaiting Upload</span>
+                              </div>
+                            )}
                           </div>
                         </div>
                       </div>
+                      
+                      {currentUser && (currentUser.role === 'government' || currentUser.role === 'company') && (
+                        <div className="flex gap-2 pt-1">
+                          <label className="flex-1 flex items-center justify-center gap-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-250 text-[9px] font-black uppercase tracking-wider py-2 rounded-xl cursor-pointer transition-all">
+                            <Camera className="h-3.5 w-3.5" />
+                            <span>Update Photo</span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={(e) => handleUpdateOngoingPhoto(idx, e)}
+                              className="hidden"
+                            />
+                          </label>
+                          {repair.status !== 'Completed' && (
+                            <button
+                              onClick={() => handleMarkOngoingCompleted(idx)}
+                              className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-[9px] font-black uppercase tracking-wider py-2 rounded-xl cursor-pointer transition-all"
+                            >
+                              Mark Completed
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   ))}
+                </div>
+              </div>
+
+              {/* NEW SECTION: SLA PERFORMANCE BOARD */}
+              <div className="bg-zinc-50 border border-zinc-200 p-6 rounded-3xl space-y-4 shadow-sm">
+                <div className="flex justify-between items-center">
+                  <div>
+                    <h3 className="text-xs font-black uppercase text-black">Civic Service Level Agreement (SLA) Status</h3>
+                    <p className="text-[10px] text-zinc-500">Service compliance levels and resolution targets by government ward.</p>
+                  </div>
+                  <span className="text-[9px] font-black text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-200 uppercase tracking-wider">
+                    94.2% On Track
+                  </span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs text-zinc-700">
+                    <thead>
+                      <tr className="border-b border-zinc-200 text-[9px] font-black uppercase tracking-wider text-zinc-400">
+                        <th className="py-2.5">Ward / Department</th>
+                        <th className="py-2.5">Issue Category</th>
+                        <th className="py-2.5">SLA Target</th>
+                        <th className="py-2.5">Avg. Resolution</th>
+                        <th className="py-2.5">Compliance</th>
+                        <th className="py-2.5 text-right">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-100 font-medium text-zinc-800">
+                      <tr>
+                        <td className="py-3 font-extrabold text-black">Ward 4 (Delhi Municipal)</td>
+                        <td className="py-3">Potholes</td>
+                        <td className="py-3 text-zinc-500">48 Hours</td>
+                        <td className="py-3 text-zinc-800">36 Hours</td>
+                        <td className="py-3 text-emerald-600 font-extrabold">96.4%</td>
+                        <td className="py-3 text-right"><span className="bg-emerald-100 text-emerald-800 text-[9px] font-black px-2 py-0.5 rounded">ON TRACK</span></td>
+                      </tr>
+                      <tr>
+                        <td className="py-3 font-extrabold text-black">Ward 12 (BMC Garbage Wing)</td>
+                        <td className="py-3">Garbage Dumping</td>
+                        <td className="py-3 text-zinc-500">24 Hours</td>
+                        <td className="py-3 text-zinc-800">18 Hours</td>
+                        <td className="py-3 text-emerald-600 font-extrabold">98.1%</td>
+                        <td className="py-3 text-right"><span className="bg-emerald-100 text-emerald-800 text-[9px] font-black px-2 py-0.5 rounded">ON TRACK</span></td>
+                      </tr>
+                      <tr>
+                        <td className="py-3 font-extrabold text-black">Ward 8 (Jal Board Sewage)</td>
+                        <td className="py-3">Water Leaks</td>
+                        <td className="py-3 text-zinc-500">72 Hours</td>
+                        <td className="py-3 text-zinc-800">64 Hours</td>
+                        <td className="py-3 text-emerald-600 font-extrabold">92.0%</td>
+                        <td className="py-3 text-right"><span className="bg-emerald-100 text-emerald-800 text-[9px] font-black px-2 py-0.5 rounded">ON TRACK</span></td>
+                      </tr>
+                      <tr>
+                        <td className="py-3 font-extrabold text-black">Ward 15 (PWD Infrastructure)</td>
+                        <td className="py-3">Streetlights</td>
+                        <td className="py-3 text-zinc-500">48 Hours</td>
+                        <td className="py-3 text-zinc-800">58 Hours</td>
+                        <td className="py-3 text-amber-600 font-extrabold">79.5%</td>
+                        <td className="py-3 text-right"><span className="bg-amber-100 text-amber-800 text-[9px] font-black px-2 py-0.5 rounded">DELAYED</span></td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
               </div>
 
