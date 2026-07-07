@@ -35,6 +35,12 @@ import { io, Socket } from 'socket.io-client';
 // Import MapLibre GL CSS to ensure maps render correctly instead of staying blank
 import 'maplibre-gl/dist/maplibre-gl.css';
 
+const BACKEND_BASE_URL = 'http://localhost:3000';
+const SPATIAL_SERVICE_BASE_URL = 'http://localhost:8001';
+// Civic Assistant agent (FastAPI + LangChain + Gemini key rotation). The
+// Gemini keys live server-side now — the browser never sees them.
+const AGENT_SERVICE_BASE_URL = 'http://localhost:8000';
+
 // --- Types ---
 type UserRole = 'citizen' | 'company' | 'government';
 
@@ -42,7 +48,7 @@ interface AppUser {
   id: string;
   name: string;
   email: string;
-  password: string;
+  password?: string;
   role: UserRole;
 }
 
@@ -330,47 +336,18 @@ export default function App() {
   // --- Chatbot State ---
   const [isChatOpen, setIsChatOpen] = useState<boolean>(false);
   const [chatbotLanguage, setChatbotLanguage] = useState<'EN' | 'HI'>('EN');
-  const [chatMessages, setChatMessages] = useState<{ sender: 'bot' | 'user'; text: string; options?: string[] }[]>(() => {
-    try {
-      const saved = localStorage.getItem('civicAssistant.chatMessages');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [chatMessages, setChatMessages] = useState<{ sender: 'bot' | 'user'; text: string; options?: string[] }[]>([]);
   const [chatInput, setChatInput] = useState<string>('');
   const [chatStep, setChatStep] = useState<number>(0);
-  const [chatDraftReport, setChatDraftReport] = useState<Partial<IssueReport>>(() => {
-    try {
-      const saved = localStorage.getItem('civicAssistant.chatDraftReport');
-      return saved ? JSON.parse(saved) : {};
-    } catch {
-      return {};
-    }
-  });
+  const [chatDraftReport, setChatDraftReport] = useState<Partial<IssueReport>>({});
   const [verificationState, setVerificationState] = useState<{
     isOpen: boolean;
     status: 'idle' | 'scanning' | 'category' | 'location' | 'success' | 'failed';
     errorMsg?: string;
   }>({ isOpen: false, status: 'idle' });
-
-  // Persist Civic Assistant memory (chat history + draft report) across reloads
-  useEffect(() => {
-    try {
-      localStorage.setItem('civicAssistant.chatMessages', JSON.stringify(chatMessages));
-    } catch {
-      // ignore storage failures (e.g. private browsing quota)
-    }
-  }, [chatMessages]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('civicAssistant.chatDraftReport', JSON.stringify(chatDraftReport));
-    } catch {
-      // ignore storage failures
-    }
-  }, [chatDraftReport]);
   const [pendingReportData, setPendingReportData] = useState<IssueReport | null>(null);
+
+  const [backendConnected, setBackendConnected] = useState<boolean>(false);
 
   // --- Reporting Form State ---
   const [showReportForm, setShowReportForm] = useState<boolean>(false);
@@ -560,6 +537,33 @@ export default function App() {
             map.current.flyTo({ center: [report.longitude, report.latitude], zoom: 14 });
           }
 
+          if (backendConnected) {
+            const formData = new FormData();
+            formData.append('latitude', report.latitude.toString());
+            formData.append('longitude', report.longitude.toString());
+            if (currentUser?.id) {
+              formData.append('reporter_id', currentUser.id);
+            }
+            fetch(`${SPATIAL_SERVICE_BASE_URL}/reports/create`, {
+              method: 'POST',
+              body: formData
+            }).then(async (res) => {
+              if (res.ok) {
+                const data = await res.json();
+                console.log('Report created successfully in backend:', data);
+                if (currentUser?.id) {
+                  fetch(`${BACKEND_BASE_URL}/gamification/event`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ event: 'REPORT_CREATED', userId: currentUser.id })
+                  }).catch(console.error);
+                }
+              }
+            }).catch(err => {
+              console.error('Failed to upload report to backend:', err);
+            });
+          }
+
           setTimeout(() => {
             setVerificationState({ isOpen: false, status: 'idle' });
             setPendingReportData(null);
@@ -611,10 +615,106 @@ export default function App() {
     }
   }, []);
 
+  // --- Check Backend & Load Reports ---
+  useEffect(() => {
+    const checkConnection = async () => {
+      try {
+        const [nestjsRes, fastapiRes] = await Promise.all([
+          fetch(`${BACKEND_BASE_URL}`).then(r => r.ok).catch(() => false),
+          fetch(`${SPATIAL_SERVICE_BASE_URL}/health`).then(r => r.json()).catch(() => null)
+        ]);
+        if (nestjsRes && fastapiRes && fastapiRes.status === 'ok') {
+          setBackendConnected(true);
+        } else {
+          setBackendConnected(false);
+        }
+      } catch {
+        setBackendConnected(false);
+      }
+    };
+    checkConnection();
+    const interval = setInterval(checkConnection, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (!backendConnected) {
+      setReports(MOCK_REPORTS);
+      return;
+    }
+    const loadReportsFromBackend = async () => {
+      try {
+        const res = await fetch(`${SPATIAL_SERVICE_BASE_URL}/reports/nearby?lat=28.6139&lon=77.2090&radius=10000000`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data && Array.isArray(data.reports)) {
+            const mapped = data.reports.map((r: any) => ({
+              id: r.id,
+              category: r.category || 'Other',
+              severity: r.severity || 'Medium',
+              status: r.status || 'Reported',
+              latitude: r.latitude,
+              longitude: r.longitude,
+              original_media_url: r.original_media_url || 'https://images.unsplash.com/photo-1599740831464-5eecfa64b8a5?auto=format&fit=crop&w=800&q=80',
+              s3_media_url: r.s3_media_url || r.original_media_url || 'https://images.unsplash.com/photo-1599740831464-5eecfa64b8a5?auto=format&fit=crop&w=800&q=80',
+              upvotes: r.upvotes || 0,
+              downvotes: r.downvotes || 0,
+              created_at: r.created_at || new Date().toISOString(),
+              description: r.description || 'Civic issue reported via Community Hero.',
+              colony_area: r.colony_area || 'Delhi, India',
+              reporter_name: r.reporter_name || 'Citizen',
+              comments: r.comments || []
+            }));
+            if (mapped.length > 0) {
+              setReports(mapped);
+            } else {
+              setReports(MOCK_REPORTS);
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load reports from backend:', err);
+      }
+    };
+    loadReportsFromBackend();
+  }, [backendConnected]);
+
   // --- Auth Handlers ---
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
+
+    if (backendConnected) {
+      try {
+        const res = await fetch(`${BACKEND_BASE_URL}/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: authEmail })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          localStorage.setItem('communityHero_token', data.accessToken);
+          const loggedUser: AppUser = {
+            id: data.user.id,
+            name: data.user.anonymizedDisplayName,
+            email: authEmail,
+            role: authRole
+          };
+          setCurrentUser(loggedUser);
+          localStorage.setItem('communityHero_currentUser', JSON.stringify(loggedUser));
+          setAuthEmail('');
+          setAuthPassword('');
+          return;
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          setAuthError(errData.message || 'Login failed.');
+          return;
+        }
+      } catch (err) {
+        console.error('Backend login failed, falling back to mock mode:', err);
+      }
+    }
+
     const user = mockUsers.find(u => u.email === authEmail && u.password === authPassword);
     if (!user) {
       setAuthError('Invalid email or password.');
@@ -626,13 +726,10 @@ export default function App() {
     setAuthPassword('');
   };
 
-  const handleSignup = (e: React.FormEvent) => {
+  const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
-    if (mockUsers.find(u => u.email === authEmail)) {
-      setAuthError('An account with this email already exists.');
-      return;
-    }
+
     // Government accounts: enforce official domain
     if (authRole === 'government') {
       const govDomains = ['.gov.in', '.nic.in', '.gov', '.nic'];
@@ -645,6 +742,54 @@ export default function App() {
       const newUser: AppUser = { id: `user-${Date.now()}`, name: authName, email: authEmail, password: authPassword, role: authRole };
       setMfaPendingUser(newUser);
       setMfaStep(true);
+      return;
+    }
+
+    if (backendConnected) {
+      try {
+        const res = await fetch(`${BACKEND_BASE_URL}/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: authEmail })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (authName) {
+            await fetch(`${BACKEND_BASE_URL}/users/me/display-name`, {
+              method: 'PATCH',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${data.accessToken}`
+              },
+              body: JSON.stringify({ name: authName })
+            }).catch(console.error);
+          }
+
+          localStorage.setItem('communityHero_token', data.accessToken);
+          const loggedUser: AppUser = {
+            id: data.user.id,
+            name: authName || data.user.anonymizedDisplayName,
+            email: authEmail,
+            role: authRole
+          };
+          setCurrentUser(loggedUser);
+          localStorage.setItem('communityHero_currentUser', JSON.stringify(loggedUser));
+          setAuthName('');
+          setAuthEmail('');
+          setAuthPassword('');
+          return;
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          setAuthError(errData.message || 'Signup failed.');
+          return;
+        }
+      } catch (err) {
+        console.error('Backend signup failed, falling back to mock mode:', err);
+      }
+    }
+
+    if (mockUsers.find(u => u.email === authEmail)) {
+      setAuthError('An account with this email already exists.');
       return;
     }
     const newUser: AppUser = {
@@ -664,14 +809,56 @@ export default function App() {
     setAuthPassword('');
   };
 
-  const handleMfaVerify = (e: React.FormEvent) => {
+  const handleMfaVerify = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Mock TOTP: accept any 6-digit code for demo
     if (!/^\d{6}$/.test(mfaCode)) {
       setAuthError('Please enter a valid 6-digit verification code.');
       return;
     }
     if (!mfaPendingUser) return;
+
+    if (backendConnected) {
+      try {
+        const res = await fetch(`${BACKEND_BASE_URL}/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: mfaPendingUser.email })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (mfaPendingUser.name) {
+            await fetch(`${BACKEND_BASE_URL}/users/me/display-name`, {
+              method: 'PATCH',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${data.accessToken}`
+              },
+              body: JSON.stringify({ name: mfaPendingUser.name })
+            }).catch(console.error);
+          }
+
+          localStorage.setItem('communityHero_token', data.accessToken);
+          const loggedUser: AppUser = {
+            id: data.user.id,
+            name: mfaPendingUser.name || data.user.anonymizedDisplayName,
+            email: mfaPendingUser.email,
+            role: mfaPendingUser.role
+          };
+          setCurrentUser(loggedUser);
+          localStorage.setItem('communityHero_currentUser', JSON.stringify(loggedUser));
+          setMfaStep(false);
+          setMfaCode('');
+          setMfaPendingUser(null);
+          setAuthName('');
+          setAuthEmail('');
+          setAuthPassword('');
+          return;
+        }
+      } catch (err) {
+        console.error('Backend MFA verification failed, falling back to mock mode:', err);
+      }
+    }
+
     const updatedUsers = [...mockUsers, mfaPendingUser];
     setMockUsers(updatedUsers);
     setCurrentUser(mfaPendingUser);
@@ -1350,26 +1537,6 @@ export default function App() {
       },
       () => alert('Unable to retrieve your location. Please allow location access.')
     );
-  };  // --- Civic Assistant agent call (via Vite dev-server proxy; key stays server-side, never in Network tab) ---
-  const fetchAgentReply = async (apiMessages: any[], draftReport: typeof chatDraftReport) => {
-    const response = await fetch('/api/gemini/agent', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: apiMessages, draftReport })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Agent endpoint failed with status: ${response.status}`);
-    }
-
-    const data = await response.json();
-    if (!data.configured) {
-      throw new Error('No configured Gemini API keys found.');
-    }
-    if (data.error) {
-      throw new Error(data.error);
-    }
-    return data.text as string;
   };
 
   // --- Chatbot Handler (With Hindi & Nominatim Colony/City parser) ---
@@ -1451,23 +1618,46 @@ export default function App() {
         }
       }
 
-      // 2. Call the Civic Assistant agent (now hosted in backend-core; keys never touch the browser)
-      {
-        try {
+      // 2. Call the civic-assistant-service backend agent (Python/FastAPI +
+      // LangChain). This replaces the old direct-to-Gemini browser call —
+      // the API keys and system-instruction/key-rotation logic now live
+      // server-side; the frontend just POSTs the conversation + draft.
+      try {
+        // Last 8 messages for context, matching the old client-side slice(-8).
+        const apiMessages = chatMessages.slice(-8).map(m => ({
+          role: m.sender === 'user' ? 'user' : 'model',
+          parts: [{ text: m.text }]
+        }));
+        apiMessages.push({
+          role: 'user',
+          parts: [{ text: text }]
+        });
 
-          // Get last 8 messages for context
-          const apiMessages = chatMessages.slice(-8).map(m => ({
-            role: m.sender === 'user' ? 'user' : 'model',
-            parts: [{ text: m.text }]
-          }));
-          apiMessages.push({
-            role: 'user',
-            parts: [{ text: text }]
-          });
+        const agentRes = await fetch(`${AGENT_SERVICE_BASE_URL}/agent`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: apiMessages,
+            draftReport: chatDraftReport,
+            session_id: currentUser?.id || 'guest',
+          }),
+        });
 
-          const responseText = await fetchAgentReply(apiMessages, chatDraftReport);
-          
-          if (responseText) {
+        const agentData = await agentRes.json();
+
+        if (!agentData.configured) {
+          // No Gemini keys configured on the backend -> fall through to
+          // local simulation below, same as the old "activeKeys.length === 0" path.
+          throw new Error('__AGENT_NOT_CONFIGURED__');
+        }
+
+        if (agentData.error) {
+          throw new Error(agentData.error);
+        }
+
+        const responseText = agentData.text;
+
+        if (responseText) {
             const cleanJson = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
             const payload = JSON.parse(cleanJson);
             
@@ -1546,11 +1736,12 @@ export default function App() {
               }
             }
 
-            setChatMessages(prev => [...prev, { sender: 'bot', text: payload.reply }]);
-            return;
-          }
-        } catch (apiErr) {
-          console.error("Gemini API call failed, falling back to local simulation", apiErr);
+          setChatMessages(prev => [...prev, { sender: 'bot', text: payload.reply }]);
+          return;
+        }
+      } catch (apiErr) {
+        if ((apiErr as Error).message !== '__AGENT_NOT_CONFIGURED__') {
+          console.error("Civic assistant agent call failed, falling back to local simulation", apiErr);
         }
       }
 
@@ -2270,7 +2461,15 @@ export default function App() {
           </div>
           <div>
             <h1 className="text-lg font-black tracking-tight text-black m-0 leading-tight">COMMUNITY HERO</h1>
-            <p className="text-[9px] text-zinc-500 uppercase tracking-widest font-bold m-0 mt-0.5">Civic Engagement Platform</p>
+            <div className="flex items-center gap-2 mt-0.5">
+              <p className="text-[9px] text-zinc-500 uppercase tracking-widest font-bold m-0 leading-none">Civic Engagement Platform</p>
+              {backendConnected && (
+                <span className="inline-flex items-center gap-1 text-[7px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full border leading-none bg-emerald-50 text-emerald-700 border-emerald-200">
+                  <span className="w-1 h-1 rounded-full bg-emerald-500" />
+                  Connected
+                </span>
+              )}
+            </div>
           </div>
         </div>
 

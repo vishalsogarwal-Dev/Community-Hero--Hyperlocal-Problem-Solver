@@ -1,30 +1,31 @@
-# Civic Assistant Agent (Python)
+# Civic Assistant Agent
 
-This is the AI agent for the Community Hero chatbot — moved out of the
-browser and rewritten in Python so the Gemini keys never sit in frontend
-code or a bundle.
+Python/FastAPI + LangChain backend for the Community Hero chatbot. Keeps
+Gemini API keys server-side (never shipped to the browser), rotates across
+keys and models, rate-limits abuse, and validates that the LLM's JSON output
+is actually valid JSON before returning it.
 
-It is a small standalone FastAPI service. It is NOT the old NestJS
-backend-core (that has been removed) — just this one agent, nothing else
-(no Postgres/Redis/RabbitMQ/Docker needed to run it).
-
-## Setup
+## Run locally (venv)
 
 ```bash
-cd agent
-python -m venv venv
-source venv/bin/activate      # Windows: venv\Scripts\activate
+cd web-dashboard/agent
+python3 -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env           # then put your real Gemini keys in .env
-```
-
-## Run
-
-```bash
+cp .env.example .env             # then edit .env with real Gemini keys
 uvicorn main:app --reload --port 8000
 ```
 
-The `web-dashboard`'s `vite.config.ts` proxies `/api/gemini/agent` to
-`http://localhost:8000/agent`, so run this alongside `npm run dev` in
-`web-dashboard`. The browser never sees the Gemini URL or key — only the
-local `/api/gemini/agent` path shows up in the Network tab.
+## Contract
+
+`POST /agent`
+```json
+{
+  "messages": [{"role": "user", "parts": [{"text": "..."}]}],
+  "draftReport": {"category": null, "description": null, "severity": null, "colony_area": null, "latitude": null, "longitude": null},
+  "session_id": "some-id"
+}
+```
+Returns `{"configured": bool, "text": "<json string>"}` or `{"configured": true, "error": "..."}`.
+
+`GET /health` — key count, model fallback chain, active sessions, rate-limit config.

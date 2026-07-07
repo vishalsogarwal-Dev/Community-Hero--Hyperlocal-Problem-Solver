@@ -82,6 +82,42 @@ services:
     networks:
       - community_hero_network
 
+  # Core NestJS Backend
+  backend-core:
+    build:
+      context: ./backend-core
+    container_name: community_hero_backend
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./backend-core/.env
+    environment:
+      DB_HOST: postgres
+      REDIS_HOST: redis
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      MINIO_ENDPOINT: minio
+    depends_on:
+      - postgres
+      - redis
+      - rabbitmq
+      - minio
+    restart: unless-stopped
+    networks:
+      - community_hero_network
+
+  # Civic Assistant Agent: FastAPI + LangChain + Gemini (key rotation)
+  civic-assistant-agent:
+    build:
+      context: ./web-dashboard/agent
+    container_name: community_hero_civic_assistant
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./web-dashboard/agent/.env
+    restart: unless-stopped
+    networks:
+      - community_hero_network
+
   # AI Async Workers: Celery + YOLOv8 + MobileNetV3
   async-workers:
     build:
@@ -94,8 +130,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
       MINIO_ENDPOINT: minio
-      # NOTE: backend-core (NestJS) was removed; set this if you stand up a notify receiver elsewhere.
-      CORE_WS_NOTIFY_URL: http://localhost:3000/internal/notify
+      CORE_WS_NOTIFY_URL: http://backend-core:3000/internal/notify
     depends_on:
       - postgres
       - redis
