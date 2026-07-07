@@ -12,6 +12,17 @@ spatial-service/.env
 backend-core/dist/
 dist/
 
-# Ignore Expo Development Cache
-mobile-app/.expo/
-.expo/
+# AI weights & temporary large assets
+*.pt
+*.onnx
+*.weights
+raw/
+public/
+downloads/
+uploads/
+temp/
+tmp/
+venv/
+**/venv/
+.env
+**/.env
